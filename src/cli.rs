@@ -1,0 +1,145 @@
+use anyhow::Result;
+use rnet_p2p::identity::multiaddr::Multiaddr;
+use rnet_p2p::identity::traits::{
+    core::INode,
+    protocols::{INodeFloodsubAPI, INodePingAPI},
+};
+use std::{io::Write, sync::Arc, time::Duration};
+use tokio::io::{self, AsyncBufReadExt};
+
+use crate::common::MpcMsgType;
+use crate::node::MPCNode;
+
+const CLI_DELAY: Duration = Duration::from_nanos(1000);
+const FLOODSUB: &str = "rnet/floodsub/0.0.1";
+const COMMANDS: &[&str] = &[
+    "help                       => print all the commands",
+    "local                      => get local peer-info",
+    "connect <maddr>            => connect with a new peer",
+    "ping <maddr> <count>       => exchange ping with a peer",
+    "fsub <maddr>               => open a new floodsub stream with the peer",
+    "join <topic>               => subscribe to a new-topic",
+    "leave <topic>              => unsubscribe to a new-topic",
+    "publish <topic> <msg>      => publish a msg to a topic",
+    "topics                     => list the subscribed topics",
+    "peers                      => list the connected peers",
+    "mesh                       => map of topics -> peer",
+];
+
+fn print_commands() {
+    for cmd in COMMANDS {
+        println!("      {}", cmd);
+    }
+}
+
+async fn handle_cmd(line: &str, mpc_node: &Arc<MPCNode>) -> Result<()> {
+    let mut parts = line.split_whitespace();
+    let cmd = parts.next().unwrap();
+
+    match cmd {
+        "help" => {
+            print_commands();
+        }
+
+        "local" => {
+            let peer_info = mpc_node.host_mpsc_tx.get_local();
+            println!("{}", peer_info.listen_addr);
+        }
+
+        "connect" => {
+            let maddr = Multiaddr::new(parts.next().unwrap()).unwrap();
+            mpc_node.host_mpsc_tx.connect(&maddr).await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        "ping" => {
+            let maddr = parts.next().unwrap();
+            let count: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+            mpc_node
+                .host_mpsc_tx
+                .ping(Some(count), maddr)
+                .await
+                .unwrap();
+        }
+
+        "fsub" => {
+            let maddr = parts.next().unwrap();
+            mpc_node
+                .host_mpsc_tx
+                .new_stream(maddr, vec![FLOODSUB.to_string()])
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        "join" => {
+            let topic = parts.next().unwrap().to_string();
+            mpc_node
+                .host_mpsc_tx
+                .floodsub_subscribe(topic)
+                .await
+                .unwrap();
+        }
+
+        "leave" => {
+            let topic = parts.next().unwrap().to_string();
+            mpc_node
+                .host_mpsc_tx
+                .floodsub_unsubscribe(vec![topic])
+                .await
+                .unwrap();
+        }
+
+        "publish" => {
+            let topic = parts.next().unwrap().to_string();
+            let msg = parts.collect::<Vec<_>>().join(" ");
+
+            // Wrap this into MpcMsgType::General
+            let mpc_general = MpcMsgType::General(msg);
+            let payload = bincode::serialize(&mpc_general).unwrap();
+
+            mpc_node
+                .host_mpsc_tx
+                .floodsub_publish(topic, payload)
+                .await
+                .unwrap();
+        }
+
+        "topics" => mpc_node.host_mpsc_tx.floodsub_topics().await.unwrap(),
+
+        "peers" => mpc_node.host_mpsc_tx.floodsub_peers().await.unwrap(),
+
+        "mesh" => mpc_node.host_mpsc_tx.floodsub_mesh().await.unwrap(),
+
+        _ => println!("Unknown command"),
+    }
+    Ok(())
+}
+
+pub async fn cli_loop(mpc_node: Arc<MPCNode>) -> Result<()> {
+    let stdin = io::BufReader::new(io::stdin());
+    let mut lines = stdin.lines();
+
+    println!("\n MPC_NODE CLI ready. Commands:");
+    print_commands();
+
+    loop {
+        print!("\nCommand => ");
+        std::io::stdout().flush().unwrap();
+
+        let line = match lines.next_line().await? {
+            Some(line) => line,
+            None => break,
+        };
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        handle_cmd(line, &mpc_node).await?;
+        tokio::time::sleep(CLI_DELAY).await;
+    }
+
+    Ok(())
+}

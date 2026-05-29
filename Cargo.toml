@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rnet-p2p = { git = "https://github.com/rnet-stack/rnet-p2p.git" }
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+bincode = "1.3"
+dotenvy = "0.15.7"
