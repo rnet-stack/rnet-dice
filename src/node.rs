@@ -13,7 +13,7 @@ use rnet_p2p::{
 use tokio::sync::{Mutex, mpsc::Receiver};
 use tracing::{debug, info};
 
-use crate::common::{MpcMsgType, set_bootstrap_node};
+use crate::common::MpcMsgType;
 
 pub struct MPCNode {
     pub host_mpsc_tx: Arc<Node>,
@@ -27,13 +27,34 @@ impl MPCNode {
     pub async fn new(mode: &str) -> Arc<MPCNode> {
         debug!("Running as {} node", mode.to_uppercase());
 
-        let mut listen_addr = Multiaddr::new("ip4/127.0.0.1/tcp/0").unwrap();
-        let (host_mpsc_tx, global_rx) = NodeInner::new(
-            &mut listen_addr,
-            vec![InnerProtocolOpt::Floodsub, InnerProtocolOpt::Ping],
-        )
-        .await
-        .unwrap();
+        let (host_mpsc_tx, global_rx, listen_addr) = match mode.as_ref() {
+            "bootstrap" => {
+                let mut listen_addr = Multiaddr::new("ip4/127.0.0.1/tcp/8888").unwrap();
+                let key_hex = env::var("BOOTSTRAP_PVT_KEY").unwrap();
+
+                let (host_mpsc_tx, global_rx) = NodeInner::new(
+                    &mut listen_addr,
+                    vec![InnerProtocolOpt::Floodsub, InnerProtocolOpt::Ping],
+                    Some(key_hex),
+                )
+                .await
+                .unwrap();
+
+                (host_mpsc_tx, global_rx, listen_addr)
+            }
+            _ => {
+                let mut listen_addr = Multiaddr::new("ip4/127.0.0.1/tcp/0").unwrap();
+                let (host_mpsc_tx, global_rx) = NodeInner::new(
+                    &mut listen_addr,
+                    vec![InnerProtocolOpt::Floodsub, InnerProtocolOpt::Ping],
+                    None,
+                )
+                .await
+                .unwrap();
+
+                (host_mpsc_tx, global_rx, listen_addr)
+            }
+        };
 
         let mpc_node = Arc::new(MPCNode {
             host_mpsc_tx,
@@ -64,8 +85,6 @@ impl MPCNode {
 
         match self.mode.as_ref() {
             "bootstrap" => {
-                set_bootstrap_node(&self.listen_addr.to_string()).unwrap();
-
                 tokio::spawn(async move {
                     mesh_mpc_node.periodic_mesh_update().await.unwrap();
                 });
@@ -118,7 +137,7 @@ impl MPCNode {
                         }
                     }
                     FloodsubMsgType::Subscribe => {
-                        debug!("FloodsubEvent: SUBSCRIBED - {}", event.topic);
+                        // debug!("FloodsubEvent: SUBSCRIBED - {}", event.topic);
                     }
                     FloodsubMsgType::Unsubscribe => {
                         debug!("FloodsubEvent: UNSUBSCRIBED - {}", event.topic);
