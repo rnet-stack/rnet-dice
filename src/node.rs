@@ -1,4 +1,4 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use rnet_p2p::{
@@ -10,7 +10,7 @@ use rnet_p2p::{
     node::{inner::NodeInner, node::Node, protocol::InnerProtocolOpt},
     protocols::FLOODSUB,
 };
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{Mutex, mpsc::Receiver};
 use tracing::{debug, info};
 
 use crate::common::{MpcMsgType, set_bootstrap_node};
@@ -19,10 +19,14 @@ pub struct MPCNode {
     pub host_mpsc_tx: Arc<Node>,
     pub mode: String,
     pub listen_addr: Multiaddr,
+
+    pub bootmesh: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl MPCNode {
     pub async fn new(mode: &str) -> Arc<MPCNode> {
+        debug!("Running as {} node", mode.to_uppercase());
+
         let mut listen_addr = Multiaddr::new("ip4/127.0.0.1/tcp/0").unwrap();
         let (host_mpsc_tx, global_rx) = NodeInner::new(
             &mut listen_addr,
@@ -35,6 +39,8 @@ impl MPCNode {
             host_mpsc_tx,
             mode: mode.to_string(),
             listen_addr,
+
+            bootmesh: Arc::new(Mutex::new(HashMap::new())),
         });
         let handler_mcp = mpc_node.clone();
 
@@ -43,20 +49,31 @@ impl MPCNode {
         });
         tokio::time::sleep(Duration::from_millis(2000)).await;
 
-        mpc_node.initiate().await.unwrap();
+        let mesh_mpc_node = mpc_node.clone();
+        mpc_node.initiate(mesh_mpc_node).await.unwrap();
 
         mpc_node
     }
 
-    pub async fn initiate(&self) -> Result<()> {
+    pub async fn initiate(&self, mesh_mpc_node: Arc<MPCNode>) -> Result<()> {
+        self.host_mpsc_tx
+            .floodsub_subscribe("mpc-common".to_string())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
         match self.mode.as_ref() {
             "bootstrap" => {
                 set_bootstrap_node(&self.listen_addr.to_string()).unwrap();
+
+                tokio::spawn(async move {
+                    mesh_mpc_node.periodic_mesh_update().await.unwrap();
+                });
             }
             "general" => {
                 // CONNECT TO BOOTSTRAP NODE
-                info!("Connection to BOOTSTRAP node...");
                 let bootstrap_node = Multiaddr::new(&env::var("BOOTSTRAP_NODE").unwrap()).unwrap();
+                info!("BOOTSTRAP node found, CONNECTING...\n");
                 self.host_mpsc_tx
                     .new_stream(&bootstrap_node.to_string(), vec![FLOODSUB.to_string()])
                     .await
@@ -66,12 +83,6 @@ impl MPCNode {
             }
             _ => {}
         }
-
-        self.host_mpsc_tx
-            .floodsub_subscribe("mpc-common".to_string())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(2000)).await;
 
         Ok(())
     }
@@ -98,7 +109,12 @@ impl MPCNode {
                             }
 
                             MpcMsgType::Session(_payload) => {}
-                            MpcMsgType::Bootmesh(_mesh) => {}
+                            MpcMsgType::Bootmesh(mesh) => {
+                                let mut bootmesh = self.bootmesh.lock().await;
+                                *bootmesh = mesh;
+
+                                debug!("BOOTMESH updated");
+                            }
                         }
                     }
                     FloodsubMsgType::Subscribe => {
@@ -111,5 +127,54 @@ impl MPCNode {
                 GlobalEvent::Ping(event) => debug!("{:?}", event),
             }
         }
+    }
+
+    pub async fn periodic_mesh_update(&self) -> Result<()> {
+        loop {
+            let bootmesh = {
+                let bootmesh = self.bootmesh.lock().await;
+
+                bootmesh.clone()
+            };
+
+            let latest_mesh = self
+                .host_mpsc_tx
+                .floodsub_mesh()
+                .await
+                .unwrap_or(HashMap::new());
+
+            let bootmesh_bytes = bincode::serialize(&bootmesh).unwrap();
+            let latest_mesh_bytes = bincode::serialize(&latest_mesh).unwrap();
+
+            if bootmesh_bytes == latest_mesh_bytes {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+
+            {
+                // Update the BOOTMESH
+                let mut bootmesh = self.bootmesh.lock().await;
+                *bootmesh = latest_mesh.clone();
+            }
+
+            self.broadcast_bootmesh(latest_mesh).await.unwrap();
+        }
+    }
+
+    pub async fn broadcast_bootmesh(&self, mesh: HashMap<String, Vec<String>>) -> Result<()> {
+        let fsub_msg = MpcMsgType::Bootmesh(mesh);
+        let payload = bincode::serialize(&fsub_msg).unwrap();
+
+        // Wait 2 seconds for the new node to settle down
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        debug!("BOOTMESH updated");
+
+        self.host_mpsc_tx
+            .floodsub_publish("mpc-common".to_string(), payload)
+            .await
+            .unwrap();
+
+        Ok(())
     }
 }

@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
 
-    println!("Enter mode bootstrap/gen (bootsrap:default): ");
+    println!("Start as bootstrap node (y/n)");
     let mut mode = String::new();
     io::stdin().read_line(&mut mode).unwrap();
 

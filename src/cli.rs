@@ -4,6 +4,7 @@ use rnet_p2p::identity::traits::{
     core::INode,
     protocols::{INodeFloodsubAPI, INodePingAPI},
 };
+use std::collections::HashMap;
 use std::{io::Write, sync::Arc, time::Duration};
 use tokio::io::{self, AsyncBufReadExt};
 
@@ -22,6 +23,7 @@ const COMMANDS: &[&str] = &[
     "leave <topic>              => unsubscribe to a new-topic",
     "publish <topic> <msg>      => publish a msg to a topic",
     "topics                     => list the subscribed topics",
+    "fpeers                      => list the connected Floodsub peers",
     "peers                      => list the connected peers",
     "mesh                       => map of topics -> peer",
 ];
@@ -105,11 +107,54 @@ async fn handle_cmd(line: &str, mpc_node: &Arc<MPCNode>) -> Result<()> {
                 .unwrap();
         }
 
-        "topics" => mpc_node.host_mpsc_tx.floodsub_topics().await.unwrap(),
+        "topics" => {
+            let topics = mpc_node
+                .host_mpsc_tx
+                .floodsub_topics()
+                .await
+                .unwrap_or(vec![]);
+            println!("{:?}", topics);
+        }
 
-        "peers" => mpc_node.host_mpsc_tx.floodsub_peers().await.unwrap(),
+        "fpeers" => {
+            let fpeers = mpc_node
+                .host_mpsc_tx
+                .floodsub_peers()
+                .await
+                .unwrap_or(vec![]);
+            fpeers.iter().for_each(|x| {
+                println!("{}", x);
+            });
+        }
 
-        "mesh" => mpc_node.host_mpsc_tx.floodsub_mesh().await.unwrap(),
+        "bootmesh" => {
+            let bootmesh = mpc_node.bootmesh.lock().await.clone();
+
+            bootmesh.iter().for_each(|(topic, peers)| {
+                println!("- {}", topic);
+                peers.iter().for_each(|peer| println!("  - {}", peer));
+            });
+        }
+
+        "peers" => {
+            let gpeers = mpc_node.host_mpsc_tx.get_peers().await;
+            gpeers
+                .iter()
+                .for_each(|peer| println!("{}", peer.to_string()));
+        }
+
+        "mesh" => {
+            let mesh = mpc_node
+                .host_mpsc_tx
+                .floodsub_mesh()
+                .await
+                .unwrap_or(HashMap::new());
+
+            mesh.iter().for_each(|(topic, peers)| {
+                println!("- {}", topic);
+                peers.iter().for_each(|peer| println!("  - {}", peer));
+            });
+        }
 
         _ => println!("Unknown command"),
     }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{collections::HashMap, fs};
 
 pub fn set_bootstrap_node(addr: &str) -> Result<()> {
     let env_path = ".env";
@@ -32,5 +32,5 @@ pub enum MpcMsgType {
     General(String),
     Session(Vec<u8>),
     Advertize(String),
-    Bootmesh(Vec<u8>),
+    Bootmesh(HashMap<String, Vec<String>>),
 }
